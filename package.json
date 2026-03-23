@@ -1,9 +1,12 @@
 {
-  "name": "pact-js",
+  "name": "@donkawechico/pact-js",
   "version": "0.1.0",
-  "private": true,
   "description": "Agnostic JavaScript runtime for the PACT protocol.",
-  "scripts": {
-    "build": "cp src/pact.js dist/pact.js"
-  }
+  "main": "dist/pact.js",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "license": "MIT"
 }
