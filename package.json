@@ -1,0 +1,9 @@
+{
+  "name": "pact-js",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agnostic JavaScript runtime for the PACT protocol.",
+  "scripts": {
+    "build": "cp src/pact.js dist/pact.js"
+  }
+}
