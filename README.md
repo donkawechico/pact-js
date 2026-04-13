@@ -21,13 +21,24 @@ Its job is to provide reusable PACT primitives such as:
 
 ## Usage
 
-Build the distributable artifact:
+Use the protocol/runtime primitives directly:
 
-```sh
-npm run build
+```js
+const Pact = require("@donkawechico/pact-js");
+
+const config = Pact.PactProtocolConfig({
+  messagePrefix: "ENC",
+  profile: Pact.PactProfile.PACT_PSK2
+});
+const secret = Pact.PactSecretGenerator.generateSharedSecret(config);
+const engine = Pact.PactEngineFactory.create(config, secret);
+
+const payload = await engine.encrypt("hello world");
+const plaintext = await engine.decrypt(payload);
 ```
 
-Consumers should decide for themselves how to integrate the built artifact, whether that is copying, bundling, packaging, vendoring, or publishing.
+The browser artifact also exposes `globalThis.Pact`. `globalThis.PactExtension`
+is kept as a compatibility alias for older consumers.
 
 ## Design Rule
 
