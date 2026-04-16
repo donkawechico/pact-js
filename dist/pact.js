@@ -317,6 +317,7 @@
 
   function normalizeProtocolConfig(config) {
     if (typeof config.messagePrefix !== "string" || config.messagePrefix === "") throw new Error("messagePrefix must not be empty");
+    if (config.messagePrefix === "pact") throw new Error("messagePrefix must not be pact");
     if (config.messagePrefix.includes("[") || config.messagePrefix.includes("]")) {
       throw new Error("messagePrefix must not contain brackets");
     }
@@ -359,6 +360,7 @@
       const root = JSON.parse(utf8Decode(base64UrlToBytes(trimmed.slice(prefix.length))));
       if (typeof root.messagePrefix !== "string") throw new Error("Missing required field: messagePrefix");
       if (root.messagePrefix === "") throw new Error("messagePrefix must not be empty");
+      if (root.messagePrefix === "pact") throw new Error("messagePrefix must not be pact");
       if (root.messagePrefix.includes("[") || root.messagePrefix.includes("]")) {
         throw new Error("messagePrefix must not contain brackets");
       }
