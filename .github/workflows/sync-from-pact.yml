@@ -1,0 +1,245 @@
+name: Sync from pact
+
+run-name: Sync from ${{ inputs.pact_repo }}@${{ inputs.pact_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pact_repo:
+        description: Upstream PACT repository in owner/name form
+        required: true
+        type: string
+      pact_sha:
+        description: Upstream PACT commit SHA to sync against
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-from-pact-${{ inputs.pact_sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate-upstream-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out pact-js
+        uses: actions/checkout@v4
+
+      - name: Read previous synced upstream SHA
+        run: |
+          mkdir -p .sync-metadata
+          if [ -f sync-state/upstream-pact.json ]; then
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("sync-state/upstream-pact.json")
+          data = json.loads(path.read_text())
+          previous = str(data.get("sha", "")).strip()
+          Path(".sync-metadata/previous-upstream-sha.txt").write_text(previous)
+          print(previous)
+          PY
+          else
+            : > .sync-metadata/previous-upstream-sha.txt
+          fi
+
+      - name: Check out upstream pact
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.pact_repo }}
+          ref: ${{ inputs.pact_sha }}
+          path: .sync-inputs/pact
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify upstream snapshot
+        run: |
+          test -f .sync-inputs/pact/SPEC.md
+          test -d .sync-inputs/pact/fixtures
+          actual_sha="$(git -C .sync-inputs/pact rev-parse HEAD)"
+          echo "Expected SHA: ${{ inputs.pact_sha }}"
+          echo "Actual SHA:   ${actual_sha}"
+          test "${actual_sha}" = "${{ inputs.pact_sha }}"
+
+      - name: Record upstream metadata
+        run: |
+          mkdir -p .sync-metadata
+          previous_sha="$(cat .sync-metadata/previous-upstream-sha.txt || true)"
+          cat > .sync-metadata/pact-source.json <<EOF
+          {
+            "repo": "${{ inputs.pact_repo }}",
+            "previous_sha": "${previous_sha}",
+            "sha": "${{ inputs.pact_sha }}"
+          }
+          EOF
+          printf '%s@%s\n' "${{ inputs.pact_repo }}" "${{ inputs.pact_sha }}" > .sync-metadata/UPSTREAM_PACT_SHA
+
+      - name: Point tests at upstream pact snapshot
+        run: |
+          test -f .sync-inputs/pact/SPEC.md
+          test -d .sync-inputs/pact/fixtures
+          echo "PACT_SPEC_DIR=$PWD/.sync-inputs/pact" >> "$GITHUB_ENV"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f npm-shrinkwrap.json ]; then
+            npm ci
+          else
+            echo "No npm lockfile found; skipping install."
+          fi
+
+      - name: Preflight upstream snapshot
+        run: |
+          test -n "${PACT_SPEC_DIR}"
+          test -f "${PACT_SPEC_DIR}/SPEC.md"
+          test -d "${PACT_SPEC_DIR}/fixtures"
+          find "${PACT_SPEC_DIR}/fixtures" -maxdepth 2 -type d | sort
+
+      - name: Run tests and capture result
+        id: tests
+        run: |
+          mkdir -p .sync-metadata
+
+          if ! node -e 'const pkg = require("./package.json"); process.exit(pkg.scripts && pkg.scripts.test ? 0 : 1)'; then
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+            {
+              echo "npm test not configured."
+              echo "No fixture test run was executed."
+            } > .sync-metadata/npm-test-summary.txt
+            exit 0
+          fi
+
+          set +e
+          npm test 2>&1 | tee .sync-metadata/npm-test.log
+          status=${PIPESTATUS[0]}
+          echo "exit_code=${status}" >> "$GITHUB_OUTPUT"
+
+          if [ "${status}" -ne 0 ]; then
+            {
+              echo "npm test failed."
+              echo
+              grep -E "FAIL|failed|Error|not ok|npm ERR!" .sync-metadata/npm-test.log || true
+            } > .sync-metadata/npm-test-summary.txt
+          else
+            {
+              echo "npm test passed."
+            } > .sync-metadata/npm-test-summary.txt
+          fi
+
+          exit 0
+
+      - name: Compute sync metadata
+        id: syncmeta
+        run: |
+          short_sha="${{ inputs.pact_sha }}"
+          short_sha="${short_sha:0:12}"
+          branch="sync/pact-${short_sha}"
+
+          if [ "${{ steps.tests.outputs.exit_code }}" = "0" ]; then
+            test_status="passed"
+          else
+            test_status="failed"
+          fi
+
+          echo "branch=${branch}" >> "$GITHUB_OUTPUT"
+          echo "test_status=${test_status}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push sync branch
+        id: pushbranch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          branch="${{ steps.syncmeta.outputs.branch }}"
+
+          git fetch origin "${branch}" || true
+
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            git checkout -B "${branch}" "origin/${branch}"
+          else
+            git checkout -B "${branch}"
+          fi
+
+          mkdir -p sync-state
+          cat > sync-state/upstream-pact.json <<EOF
+          {
+            "repo": "${{ inputs.pact_repo }}",
+            "sha": "${{ inputs.pact_sha }}",
+            "branch": "${branch}",
+            "testStatus": "${{ steps.syncmeta.outputs.test_status }}",
+            "generatedByWorkflow": "sync-from-pact",
+            "generatedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+
+          cp .sync-metadata/npm-test-summary.txt sync-state/npm-test-summary.txt
+
+          git add sync-state/upstream-pact.json sync-state/npm-test-summary.txt
+
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Sync pact upstream state for ${{ inputs.pact_sha }}"
+            git push --force-with-lease origin "${branch}"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build sync summary
+        run: |
+          python3 scripts/build_sync_summary.py
+
+      - name: Create or update draft PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch="${{ steps.syncmeta.outputs.branch }}"
+          base="${{ github.event.repository.default_branch }}"
+
+          pr_number="$(gh api \
+            "repos/${{ github.repository }}/pulls?state=open&head=${{ github.repository_owner }}:${branch}&base=${base}" \
+            --jq '.[0].number')"
+
+          title="Sync PACT upstream ${{ inputs.pact_sha }}"
+          if [ "${pr_number}" = "" ] || [ "${pr_number}" = "null" ]; then
+            gh pr create \
+              --base "${base}" \
+              --head "${branch}" \
+              --title "${title}" \
+              --body-file .sync-metadata/pr-body.md \
+              --draft
+          else
+            gh pr edit "${pr_number}" \
+              --title "${title}" \
+              --body-file .sync-metadata/pr-body.md
+          fi
+
+      - name: Upload sync artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-from-pact-${{ inputs.pact_sha }}
+          include-hidden-files: true
+          path: |
+            .sync-metadata/**
+            .sync-inputs/pact/SPEC.md
+            .sync-inputs/pact/fixtures/**
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail workflow if fixture tests failed
+        if: steps.tests.outputs.exit_code != '0'
+        run: |
+          echo "Upstream fixture tests failed. Draft PR created or updated."
+          exit 1
