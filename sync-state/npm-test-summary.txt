@@ -1,0 +1,2 @@
+npm test not configured.
+No fixture test run was executed.
